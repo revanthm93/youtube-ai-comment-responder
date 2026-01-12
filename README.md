@@ -237,4 +237,4 @@ MIT License
 
 ## Author
 
-Revanth - Portfolio project demonstrating AI engineering skills
+Revanth
