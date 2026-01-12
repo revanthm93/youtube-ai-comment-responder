@@ -1,0 +1,178 @@
+# YouTube AI Comment Responder - Docker Compose Configuration
+# Use: docker-compose -f docker/docker-compose.yml up
+
+version: "3.9"
+
+services:
+  # ==========================================================================
+  # FastAPI Application
+  # ==========================================================================
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: youtube-responder-api
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=production
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/youtube_responder
+      - CHROMA_PERSIST_DIRECTORY=/app/data/chroma
+    env_file:
+      - ../.env
+    volumes:
+      - chroma_data:/app/data/chroma
+      - app_logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - youtube-responder-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ==========================================================================
+  # Celery Worker
+  # ==========================================================================
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: youtube-responder-worker
+    command: celery -A src.tasks.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/youtube_responder
+      - CHROMA_PERSIST_DIRECTORY=/app/data/chroma
+    env_file:
+      - ../.env
+    volumes:
+      - chroma_data:/app/data/chroma
+      - app_logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - youtube-responder-network
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Celery Beat (Scheduler)
+  # ==========================================================================
+  celery-beat:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: youtube-responder-beat
+    command: celery -A src.tasks.celery_app beat --loglevel=info
+    environment:
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    env_file:
+      - ../.env
+    depends_on:
+      - celery-worker
+    networks:
+      - youtube-responder-network
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Flower (Celery Monitoring)
+  # ==========================================================================
+  flower:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: youtube-responder-flower
+    command: celery -A src.tasks.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    env_file:
+      - ../.env
+    depends_on:
+      - celery-worker
+    networks:
+      - youtube-responder-network
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Redis (Message Broker & Cache)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: youtube-responder-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - youtube-responder-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # PostgreSQL (Database)
+  # ==========================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: youtube-responder-postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=youtube_responder
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - youtube-responder-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# ==========================================================================
+# Networks
+# ==========================================================================
+networks:
+  youtube-responder-network:
+    driver: bridge
+
+# ==========================================================================
+# Volumes
+# ==========================================================================
+volumes:
+  redis_data:
+  postgres_data:
+  chroma_data:
+  app_logs:
